@@ -16,7 +16,7 @@ export ASG_MAX_NODES="${asg_max_nodes}"
 export AWS_REGION=${aws_region}
 export AWS_SUBNETS="${aws_subnets}"
 export ADDONS="${addons}"
-export KUBERNETES_VERSION="1.21.2"
+export KUBERNETES_VERSION="1.25.4"
 
 # Set this only after setting the defaults
 set -o nounset
@@ -84,24 +84,9 @@ yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce
 sudo yum install -y containerd.io
 mkdir -p /etc/containerd
 containerd config default > /etc/containerd/config.toml
-sed -i '/^          \[plugins\."io\.containerd\.grpc\.v1\.cri"\.containerd\.runtimes\.runc\.options\]/a \            SystemdCgroup = true' /etc/containerd/config.toml
+sed -i 's/SystemdCgroup = false/SystemdCgroup = true/g' /etc/containerd/config.toml
 systemctl restart containerd
-
-########################################
-########################################
-# Install docker
-########################################
-########################################
-
-# yum install -y yum-utils device-mapper-persistent-data lvm2 docker
-
-# # Start services
-# systemctl enable docker
-# systemctl start docker
-
-# # Set settings needed by Docker
-# sysctl net.bridge.bridge-nf-call-iptables=1
-# sysctl net.bridge.bridge-nf-call-ip6tables=1
+systemctl enable containerd
 
 ########################################
 ########################################
@@ -113,8 +98,8 @@ sudo cat <<EOF > /etc/yum.repos.d/kubernetes.repo
 name=Kubernetes
 baseurl=https://packages.cloud.google.com/yum/repos/kubernetes-el7-x86_64
 enabled=1
-gpgcheck=1
-repo_gpgcheck=1
+gpgcheck=0
+repo_gpgcheck=0
 gpgkey=https://packages.cloud.google.com/yum/doc/yum-key.gpg https://packages.cloud.google.com/yum/doc/rpm-package-key.gpg
 exclude=kubelet kubeadm kubectl
 EOF
@@ -140,34 +125,39 @@ fi
 # Initialize the master
 cat >/tmp/kubeadm.yaml <<EOF
 ---
-apiVersion: kubeadm.k8s.io/v1beta2
+apiVersion: kubeadm.k8s.io/v1beta3
 kind: InitConfiguration
 bootstrapTokens:
-- groups:
-  - system:bootstrappers:kubeadm:default-node-token
-  token: $KUBEADM_TOKEN
-  ttl: 0s
-  usages:
-  - signing
-  - authentication
+  - groups:
+      - system:bootstrappers:kubeadm:default-node-token
+    token: $KUBEADM_TOKEN
+    ttl: 0s
+    usages:
+      - signing
+      - authentication
 nodeRegistration:
+  criSocket: unix:///var/run/containerd/containerd.sock
+  imagePullPolicy: IfNotPresent
   kubeletExtraArgs:
+    cgroup-driver: systemd
     cloud-provider: aws
     read-only-port: "10255"
-    cgroup-driver: systemd
   name: $FULL_HOSTNAME
   taints:
-  - effect: NoSchedule
-    key: node-role.kubernetes.io/master
+    - effect: NoSchedule
+      key: node-role.kubernetes.io/master
+localAPIEndpoint:
+  advertiseAddress: $LOCAL_IP_ADDRESS
+  bindPort: 6443
 ---
-apiVersion: kubeadm.k8s.io/v1beta2
+apiVersion: kubeadm.k8s.io/v1beta3
 kind: ClusterConfiguration
 apiServer:
   certSANs:
-  - $DNS_NAME
-  - $IP_ADDRESS
-  - $LOCAL_IP_ADDRESS
-  - $FULL_HOSTNAME
+    - $DNS_NAME
+    - $IP_ADDRESS
+    - $LOCAL_IP_ADDRESS
+    - $FULL_HOSTNAME
   extraArgs:
     cloud-provider: aws
   timeoutForControlPlane: 5m0s
@@ -176,12 +166,10 @@ clusterName: kubernetes
 controllerManager:
   extraArgs:
     cloud-provider: aws
-dns:
-  type: CoreDNS
+dns: {}
 etcd:
   local:
     dataDir: /var/lib/etcd
-imageRepository: k8s.gcr.io
 kubernetesVersion: v$KUBERNETES_VERSION
 networking:
   dnsDomain: cluster.local
@@ -198,8 +186,8 @@ kubeadm init --config /tmp/kubeadm.yaml
 export KUBECONFIG=/etc/kubernetes/admin.conf
 
 # Install calico
-kubectl apply -f /tmp/calico.yaml
-
+kubectl create -f https://raw.githubusercontent.com/scholzj/terraform-aws-minikube/master/calico/calico-operator.yaml
+kubectl create -f https://raw.githubusercontent.com/scholzj/terraform-aws-minikube/master/calico/calico-cr.yaml
 
 ########################################
 ########################################
@@ -212,7 +200,7 @@ kubectl create clusterrolebinding admin-cluster-binding --clusterrole=cluster-ad
 
 # Prepare the kubectl config file for download to client (IP address)
 export KUBECONFIG_OUTPUT=/home/centos/kubeconfig_ip
-kubeadm alpha kubeconfig user --client-name admin --config /tmp/kubeadm.yaml > $KUBECONFIG_OUTPUT
+kubeadm kubeconfig user --client-name admin --config /tmp/kubeadm.yaml > $KUBECONFIG_OUTPUT
 chown centos:centos $KUBECONFIG_OUTPUT
 chmod 0600 $KUBECONFIG_OUTPUT
 
